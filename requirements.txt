@@ -2,3 +2,4 @@ groq
 python-dotenv
 fastapi
 uvicorn
+tavily-python
