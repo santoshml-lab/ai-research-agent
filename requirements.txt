@@ -6,3 +6,4 @@ python-dotenv
 pypdf
 scikit-learn
 numpy
+python-multipart
