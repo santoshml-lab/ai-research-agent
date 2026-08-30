@@ -120,7 +120,8 @@ def run_agent(
 
         return {
             "goal": request.goal,
-            "result": result
+            "result": result,
+            "activity": agent.last_activity
         }
 
     except Exception as error:
