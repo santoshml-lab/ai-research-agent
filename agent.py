@@ -139,8 +139,15 @@ class ResearchAgent:
                     "Understand the user's goal and use tools when needed. "
                     "Use the calculator for mathematical calculations. "
                     "Use web_search when current or external information "
-                    "is required. After receiving tool results, provide "
-                    "a clear and useful final answer."
+                    "is required. "
+                    "After receiving tool results, provide a clear, "
+                    "accurate and useful final answer. "
+                    "When web_search is used, base your answer on the "
+                    "returned search results. "
+                    "Include a 'Sources' section at the end containing "
+                    "the most relevant URLs exactly as provided by the "
+                    "search tool. "
+                    "Do not invent sources or URLs."
                 )
             },
             {
