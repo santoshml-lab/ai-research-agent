@@ -1,5 +1,8 @@
-groq
-python-dotenv
 fastapi
 uvicorn
+groq
 tavily-python
+python-dotenv
+pypdf
+scikit-learn
+numpy
