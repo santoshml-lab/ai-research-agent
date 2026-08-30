@@ -127,6 +127,7 @@ class ResearchAgent:
 
     def __init__(self):
         self.name = "AI Research Agent"
+        self.conversation_history = []
 
     def run(self, goal):
 
@@ -136,7 +137,7 @@ class ResearchAgent:
                 "content": (
                     "You are an AI Research Agent. "
                     "Understand the user's goal and complete it using "
-                    "the available tools when necessary. "
+                    "available tools when necessary. "
 
                     "Use the calculator for mathematical calculations. "
                     "Use web_search for current or external information. "
@@ -145,27 +146,30 @@ class ResearchAgent:
                     "when needed. Continue working until the user's goal "
                     "is fully completed. "
 
-                    "Do not stop after the first tool call if additional "
-                    "information or calculations are required. "
+                    "Use the previous conversation context when it is "
+                    "relevant to the current request. "
 
                     "When web_search is used, base your answer on the "
                     "returned search results. "
 
                     "Include a Sources section when web_search is used. "
                     "Use URLs exactly as returned by the search tool. "
-                    "Never invent sources or URLs. "
-
-                    "When the task is complete, provide a clear and "
-                    "useful final answer."
+                    "Never invent sources or URLs."
                 )
-            },
+            }
+        ]
+
+        # Add previous conversation
+        messages.extend(self.conversation_history)
+
+        # Add current user request
+        messages.append(
             {
                 "role": "user",
                 "content": goal
             }
-        ]
+        )
 
-        # Maximum number of tool rounds
         max_iterations = 5
 
         for _ in range(max_iterations):
@@ -181,13 +185,36 @@ class ResearchAgent:
 
             message = response.choices[0].message
 
-            # Agent has finished the task
+            # Agent finished the task
             if not message.tool_calls:
-                return message.content
+
+                final_answer = message.content
+
+                # Save conversation
+                self.conversation_history.append(
+                    {
+                        "role": "user",
+                        "content": goal
+                    }
+                )
+
+                self.conversation_history.append(
+                    {
+                        "role": "assistant",
+                        "content": final_answer
+                    }
+                )
+
+                # Keep memory limited
+                self.conversation_history = (
+                    self.conversation_history[-10:]
+                )
+
+                return final_answer
 
             messages.append(message)
 
-            # Execute tool calls
+            # Execute tools
             for tool_call in message.tool_calls:
 
                 function_name = tool_call.function.name
@@ -197,7 +224,9 @@ class ResearchAgent:
                         tool_call.function.arguments
                     )
                 except json.JSONDecodeError:
+
                     result = "Invalid tool arguments."
+
                     messages.append(
                         {
                             "role": "tool",
@@ -205,6 +234,7 @@ class ResearchAgent:
                             "content": result
                         }
                     )
+
                     continue
 
                 if function_name == "calculator":
@@ -232,12 +262,21 @@ class ResearchAgent:
                 )
 
         return (
-            "The agent reached the maximum number of tool steps "
-            "without completing the task."
+            "The agent reached the maximum number of "
+            "tool steps without completing the task."
         )
 
 
 agent = ResearchAgent()
+
+
+
+
+
+
+
+
+
 
 
 
