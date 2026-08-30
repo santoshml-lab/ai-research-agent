@@ -397,12 +397,22 @@ class ResearchAgent:
 
         self.conversation_history = []
 
+        # =========================
+        # LAST ACTIVITY
+        # =========================
+
+        self.last_activity = []
+
 
     # =========================
     # RUN AGENT
     # =========================
 
     def run(self, goal):
+
+        # Reset activity for new request
+
+        self.last_activity = []
 
         messages = [
 
@@ -426,6 +436,9 @@ class ResearchAgent:
                     "Use document_search when the "
                     "answer should come from the "
                     "loaded document. "
+
+                    "Choose the most appropriate "
+                    "tool for the user's request. "
 
                     "You may use multiple tools "
                     "and multiple tool calls when "
@@ -488,7 +501,7 @@ class ResearchAgent:
 
         max_iterations = 5
 
-        for _ in range(
+        for iteration in range(
             max_iterations
         ):
 
@@ -568,6 +581,62 @@ class ResearchAgent:
                 function_name = (
                     tool_call.function.name
                 )
+
+
+                # =========================
+                # TOOL ACTIVITY
+                # =========================
+
+                activity_map = {
+
+                    "calculator": {
+                        "tool": "calculator",
+                        "label": "Calculator",
+                        "icon": "calculator"
+                    },
+
+                    "web_search": {
+                        "tool": "web_search",
+                        "label": "Web Search",
+                        "icon": "globe"
+                    },
+
+                    "document_search": {
+                        "tool": "document_search",
+                        "label": "Document Search",
+                        "icon": "file"
+                    }
+                }
+
+
+                activity = activity_map.get(
+                    function_name
+                )
+
+
+                if activity:
+
+                    self.last_activity.append(
+                        {
+                            "step": len(
+                                self.last_activity
+                            ) + 1,
+
+                            "tool": activity[
+                                "tool"
+                            ],
+
+                            "label": activity[
+                                "label"
+                            ],
+
+                            "icon": activity[
+                                "icon"
+                            ],
+
+                            "status": "completed"
+                        }
+                    )
 
 
                 # =========================
