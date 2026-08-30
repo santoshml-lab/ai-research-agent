@@ -1,4 +1,5 @@
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from agent import agent
@@ -11,9 +12,33 @@ app = FastAPI(
 )
 
 
+# =========================
+# CORS
+# =========================
+
+app.add_middleware(
+    CORSMiddleware,
+    
+        
+        
+    
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+# =========================
+# REQUEST MODEL
+# =========================
+
 class AgentRequest(BaseModel):
     goal: str
 
+
+# =========================
+# ROOT
+# =========================
 
 @app.get("/")
 def root():
@@ -21,6 +46,10 @@ def root():
         "message": "AI Research Agent API is running 🚀"
     }
 
+
+# =========================
+# AGENT
+# =========================
 
 @app.post("/agent")
 def run_agent(request: AgentRequest):
