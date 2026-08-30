@@ -119,7 +119,6 @@ tools = [
     }
 ]
 
-
 # =========================
 # AI AGENT
 # =========================
@@ -136,18 +135,28 @@ class ResearchAgent:
                 "role": "system",
                 "content": (
                     "You are an AI Research Agent. "
-                    "Understand the user's goal and use tools when needed. "
+                    "Understand the user's goal and complete it using "
+                    "the available tools when necessary. "
+
                     "Use the calculator for mathematical calculations. "
-                    "Use web_search when current or external information "
-                    "is required. "
-                    "After receiving tool results, provide a clear, "
-                    "accurate and useful final answer. "
+                    "Use web_search for current or external information. "
+
+                    "You may use multiple tools and multiple tool calls "
+                    "when needed. Continue working until the user's goal "
+                    "is fully completed. "
+
+                    "Do not stop after the first tool call if additional "
+                    "information or calculations are required. "
+
                     "When web_search is used, base your answer on the "
                     "returned search results. "
-                    "Include a 'Sources' section at the end containing "
-                    "the most relevant URLs exactly as provided by the "
-                    "search tool. "
-                    "Do not invent sources or URLs."
+
+                    "Include a Sources section when web_search is used. "
+                    "Use URLs exactly as returned by the search tool. "
+                    "Never invent sources or URLs. "
+
+                    "When the task is complete, provide a clear and "
+                    "useful final answer."
                 )
             },
             {
@@ -156,62 +165,88 @@ class ResearchAgent:
             }
         ]
 
-        response = groq_client.chat.completions.create(
-            model="openai/gpt-oss-20b",
-            messages=messages,
-            tools=tools,
-            tool_choice="auto",
-            temperature=0.2
-        )
+        # Maximum number of tool rounds
+        max_iterations = 5
 
-        message = response.choices[0].message
+        for _ in range(max_iterations):
 
-        # No tool required
-        if not message.tool_calls:
-            return message.content
-
-        messages.append(message)
-
-        # Execute requested tools
-        for tool_call in message.tool_calls:
-
-            function_name = tool_call.function.name
-
-            arguments = json.loads(
-                tool_call.function.arguments
+            response = groq_client.chat.completions.create(
+                model="openai/gpt-oss-20b",
+                messages=messages,
+                tools=tools,
+                tool_choice="auto",
+                parallel_tool_calls=False,
+                temperature=0.2
             )
 
-            if function_name == "calculator":
+            message = response.choices[0].message
 
-                result = calculator(
-                    arguments["expression"]
+            # Agent has finished the task
+            if not message.tool_calls:
+                return message.content
+
+            messages.append(message)
+
+            # Execute tool calls
+            for tool_call in message.tool_calls:
+
+                function_name = tool_call.function.name
+
+                try:
+                    arguments = json.loads(
+                        tool_call.function.arguments
+                    )
+                except json.JSONDecodeError:
+                    result = "Invalid tool arguments."
+                    messages.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": tool_call.id,
+                            "content": result
+                        }
+                    )
+                    continue
+
+                if function_name == "calculator":
+
+                    result = calculator(
+                        arguments["expression"]
+                    )
+
+                elif function_name == "web_search":
+
+                    result = web_search(
+                        arguments["query"]
+                    )
+
+                else:
+
+                    result = "Unknown tool."
+
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tool_call.id,
+                        "content": result
+                    }
                 )
 
-            elif function_name == "web_search":
-
-                result = web_search(
-                    arguments["query"]
-                )
-
-            else:
-                result = "Unknown tool."
-
-            messages.append(
-                {
-                    "role": "tool",
-                    "tool_call_id": tool_call.id,
-                    "content": result
-                }
-            )
-
-        # Final response
-        final_response = groq_client.chat.completions.create(
-            model="openai/gpt-oss-20b",
-            messages=messages,
-            temperature=0.2
+        return (
+            "The agent reached the maximum number of tool steps "
+            "without completing the task."
         )
-
-        return final_response.choices[0].message.content
 
 
 agent = ResearchAgent()
+
+
+
+
+
+
+
+
+
+    
+
+        
