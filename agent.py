@@ -81,7 +81,10 @@ class ResearchAgent:
         ]
 
         response = client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
+            model="openai/gpt-oss-20b",
+
+
+            
             messages=messages,
             tools=tools,
             tool_choice="auto",
@@ -122,7 +125,7 @@ class ResearchAgent:
 
         # Generate final answer
         final_response = client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
+            model="openai/gpt-oss-20b",
             messages=messages,
             temperature=0.2
         )
