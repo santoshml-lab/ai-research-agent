@@ -1,12 +1,18 @@
 import os
 import json
+
 from dotenv import load_dotenv
 from groq import Groq
+from tavily import TavilyClient
 
 load_dotenv()
 
-client = Groq(
+groq_client = Groq(
     api_key=os.getenv("GROQ_API_KEY")
+)
+
+tavily_client = TavilyClient(
+    api_key=os.getenv("TAVILY_API_KEY")
 )
 
 
@@ -32,6 +38,47 @@ def calculator(expression):
         return "Could not calculate the expression."
 
 
+# =========================
+# SEARCH TOOL
+# =========================
+
+def web_search(query):
+    try:
+        response = tavily_client.search(
+            query=query,
+            search_depth="basic",
+            max_results=5
+        )
+
+        results = response.get("results", [])
+
+        if not results:
+            return "No search results found."
+
+        formatted_results = []
+
+        for result in results:
+            formatted_results.append(
+                {
+                    "title": result.get("title", ""),
+                    "content": result.get("content", ""),
+                    "url": result.get("url", "")
+                }
+            )
+
+        return json.dumps(
+            formatted_results,
+            ensure_ascii=False
+        )
+
+    except Exception as error:
+        return f"Search error: {error}"
+
+
+# =========================
+# TOOLS
+# =========================
+
 tools = [
     {
         "type": "function",
@@ -43,10 +90,29 @@ tools = [
                 "properties": {
                     "expression": {
                         "type": "string",
-                        "description": "Mathematical expression to calculate."
+                        "description": "Mathematical expression."
                     }
                 },
                 "required": ["expression"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "web_search",
+            "description": (
+                "Search the web for current or factual information."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Search query."
+                    }
+                },
+                "required": ["query"]
             }
         }
     }
@@ -69,9 +135,11 @@ class ResearchAgent:
                 "role": "system",
                 "content": (
                     "You are an AI Research Agent. "
-                    "Understand the user's goal. "
-                    "Use the calculator tool whenever "
-                    "accurate mathematical calculation is required."
+                    "Understand the user's goal and use tools when needed. "
+                    "Use the calculator for mathematical calculations. "
+                    "Use web_search when current or external information "
+                    "is required. After receiving tool results, provide "
+                    "a clear and useful final answer."
                 )
             },
             {
@@ -80,11 +148,8 @@ class ResearchAgent:
             }
         ]
 
-        response = client.chat.completions.create(
+        response = groq_client.chat.completions.create(
             model="openai/gpt-oss-20b",
-
-
-            
             messages=messages,
             tools=tools,
             tool_choice="auto",
@@ -97,7 +162,6 @@ class ResearchAgent:
         if not message.tool_calls:
             return message.content
 
-        # Add assistant tool-call message
         messages.append(message)
 
         # Execute requested tools
@@ -115,16 +179,25 @@ class ResearchAgent:
                     arguments["expression"]
                 )
 
-                messages.append(
-                    {
-                        "role": "tool",
-                        "tool_call_id": tool_call.id,
-                        "content": result
-                    }
+            elif function_name == "web_search":
+
+                result = web_search(
+                    arguments["query"]
                 )
 
-        # Generate final answer
-        final_response = client.chat.completions.create(
+            else:
+                result = "Unknown tool."
+
+            messages.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": tool_call.id,
+                    "content": result
+                }
+            )
+
+        # Final response
+        final_response = groq_client.chat.completions.create(
             model="openai/gpt-oss-20b",
             messages=messages,
             temperature=0.2
