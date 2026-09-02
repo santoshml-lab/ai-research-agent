@@ -1,25 +1,28 @@
 import os
 import json
+import re
 
 from dotenv import load_dotenv
 from groq import Groq
 from tavily import TavilyClient
 
 from pypdf import PdfReader
+
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
+from scipy.sparse import hstack
 
 
-# =========================
+# =========================================================
 # ENVIRONMENT
-# =========================
+# =========================================================
 
 load_dotenv()
 
 
-# =========================
+# =========================================================
 # CLIENTS
-# =========================
+# =========================================================
 
 groq_client = Groq(
     api_key=os.getenv("GROQ_API_KEY")
@@ -30,9 +33,9 @@ tavily_client = TavilyClient(
 )
 
 
-# =========================
+# =========================================================
 # CALCULATOR TOOL
-# =========================
+# =========================================================
 
 def calculator(expression):
 
@@ -56,9 +59,9 @@ def calculator(expression):
         return "Could not calculate the expression."
 
 
-# =========================
+# =========================================================
 # WEB SEARCH TOOL
-# =========================
+# =========================================================
 
 def web_search(query):
 
@@ -89,10 +92,12 @@ def web_search(query):
                         "title",
                         ""
                     ),
+
                     "content": result.get(
                         "content",
                         ""
                     ),
+
                     "url": result.get(
                         "url",
                         ""
@@ -110,22 +115,119 @@ def web_search(query):
         return f"Search error: {error}"
 
 
-# =========================
+# =========================================================
 # RAG DOCUMENT STORE
-# =========================
+# =========================================================
 
 documents = []
 
-vectorizer = TfidfVectorizer(
-    stop_words="english"
+word_vectorizer = TfidfVectorizer(
+    stop_words="english",
+    ngram_range=(1, 2),
+    sublinear_tf=True
+)
+
+char_vectorizer = TfidfVectorizer(
+    analyzer="char",
+    ngram_range=(3, 5),
+    min_df=1,
+    sublinear_tf=True
 )
 
 document_vectors = None
 
 
-# =========================
+# =========================================================
+# CHUNK SETTINGS
+# =========================================================
+
+CHUNK_SIZE = 1200
+CHUNK_OVERLAP = 200
+
+DEFAULT_TOP_K = 6
+
+MIN_RELEVANCE_SCORE = 0.03
+
+
+# =========================================================
+# TEXT CLEANING
+# =========================================================
+
+def clean_text(text):
+
+    if not text:
+        return ""
+
+    text = text.replace(
+        "\x00",
+        " "
+    )
+
+    text = re.sub(
+        r"\s+",
+        " ",
+        text
+    )
+
+    return text.strip()
+
+
+# =========================================================
+# CHUNK TEXT
+# =========================================================
+
+def create_chunks(
+    text,
+    page_number
+):
+
+    text = clean_text(text)
+
+    if not text:
+        return []
+
+    chunks = []
+
+    start = 0
+
+    text_length = len(text)
+
+    while start < text_length:
+
+        end = min(
+            start + CHUNK_SIZE,
+            text_length
+        )
+
+        chunk_text = text[
+            start:end
+        ].strip()
+
+        if chunk_text:
+
+            chunks.append(
+                {
+                    "page": page_number,
+
+                    "content": chunk_text,
+
+                    "chunk_start": start,
+
+                    "chunk_end": end
+                }
+            )
+
+        if end >= text_length:
+            break
+
+        start = end - CHUNK_OVERLAP
+
+    return chunks
+
+
+# =========================================================
 # LOAD DOCUMENT
-# =========================
+# =========================================================
 
 def load_document(file_path):
 
@@ -138,68 +240,105 @@ def load_document(file_path):
             file_path
         )
 
-        text = ""
+        new_documents = []
 
-        for page in reader.pages:
+        # -------------------------------------------------
+        # READ PAGE BY PAGE
+        # -------------------------------------------------
+
+        for page_index, page in enumerate(
+            reader.pages,
+            start=1
+        ):
 
             page_text = page.extract_text()
 
-            if page_text:
+            if not page_text:
+                continue
 
-                text += page_text + "\n"
+            page_chunks = create_chunks(
+                page_text,
+                page_index
+            )
 
-        if not text.strip():
+            new_documents.extend(
+                page_chunks
+            )
+
+        if not new_documents:
+
+            documents = []
+
+            document_vectors = None
 
             return (
                 "No readable text found "
                 "in the document."
             )
 
-        # =========================
-        # CHUNKING
-        # =========================
+        documents = new_documents
 
-        chunk_size = 1200
+        # -------------------------------------------------
+        # WORD TF-IDF
+        # -------------------------------------------------
 
-        documents = [
-            text[i:i + chunk_size]
-            for i in range(
-                0,
-                len(text),
-                chunk_size
-            )
-            if text[i:i + chunk_size].strip()
-        ]
-
-        # =========================
-        # CREATE VECTORS
-        # =========================
-
-        document_vectors = (
-            vectorizer.fit_transform(
-                documents
+        word_vectors = (
+            word_vectorizer.fit_transform(
+                [
+                    item["content"]
+                    for item in documents
+                ]
             )
         )
+
+        # -------------------------------------------------
+        # CHARACTER TF-IDF
+        # -------------------------------------------------
+
+        char_vectors = (
+            char_vectorizer.fit_transform(
+                [
+                    item["content"]
+                    for item in documents
+                ]
+            )
+        )
+
+        # -------------------------------------------------
+        # COMBINE WORD + CHARACTER FEATURES
+        # -------------------------------------------------
+
+        document_vectors = hstack(
+            [
+                word_vectors,
+                char_vectors
+            ]
+        ).tocsr()
 
         return (
             f"Document loaded successfully. "
-            f"Created {len(documents)} chunks."
+            f"Pages: {len(reader.pages)}. "
+            f"Created {len(documents)} overlapping chunks."
         )
 
     except Exception as error:
+
+        documents = []
+
+        document_vectors = None
 
         return (
             f"Document loading error: {error}"
         )
 
 
-# =========================
+# =========================================================
 # DOCUMENT SEARCH TOOL
-# =========================
+# =========================================================
 
 def document_search(
     query,
-    top_k=3
+    top_k=DEFAULT_TOP_K
 ):
 
     if (
@@ -214,33 +353,148 @@ def document_search(
 
     try:
 
-        query_vector = (
-            vectorizer.transform(
+        # -------------------------------------------------
+        # CREATE QUERY VECTORS
+        # -------------------------------------------------
+
+        query_word_vector = (
+            word_vectorizer.transform(
                 [query]
             )
         )
+
+        query_char_vector = (
+            char_vectorizer.transform(
+                [query]
+            )
+        )
+
+        query_vector = hstack(
+            [
+                query_word_vector,
+                query_char_vector
+            ]
+        ).tocsr()
+
+        # -------------------------------------------------
+        # COSINE SIMILARITY
+        # -------------------------------------------------
 
         similarities = cosine_similarity(
             query_vector,
             document_vectors
         )[0]
 
-        top_indexes = (
+        # -------------------------------------------------
+        # RANK ALL CHUNKS
+        # -------------------------------------------------
+
+        ranked_indexes = (
             similarities.argsort()[
-                -top_k:
-            ][::-1]
+                ::-1
+            ]
+        )
+
+        selected_indexes = []
+
+        # -------------------------------------------------
+        # SELECT RELEVANT CHUNKS
+        # -------------------------------------------------
+
+        for index in ranked_indexes:
+
+            score = float(
+                similarities[index]
+            )
+
+            if score < MIN_RELEVANCE_SCORE:
+
+                continue
+
+            if index not in selected_indexes:
+
+                selected_indexes.append(
+                    int(index)
+                )
+
+            if len(selected_indexes) >= top_k:
+
+                break
+
+        # -------------------------------------------------
+        # FALLBACK
+        # -------------------------------------------------
+
+        if not selected_indexes:
+
+            best_index = int(
+                similarities.argmax()
+            )
+
+            selected_indexes = [
+                best_index
+            ]
+
+        # -------------------------------------------------
+        # ADD ADJACENT CHUNKS
+        # -------------------------------------------------
+
+        expanded_indexes = set(
+            selected_indexes
+        )
+
+        for index in selected_indexes:
+
+            previous_index = index - 1
+
+            next_index = index + 1
+
+            if (
+                previous_index >= 0
+                and previous_index < len(documents)
+            ):
+
+                expanded_indexes.add(
+                    previous_index
+                )
+
+            if (
+                next_index >= 0
+                and next_index < len(documents)
+            ):
+
+                expanded_indexes.add(
+                    next_index
+                )
+
+        # -------------------------------------------------
+        # SORT BY ORIGINAL DOCUMENT ORDER
+        # -------------------------------------------------
+
+        final_indexes = sorted(
+            expanded_indexes
         )
 
         results = []
 
-        for index in top_indexes:
+        for index in final_indexes:
 
             results.append(
                 {
-                    "score": float(
-                        similarities[index]
+                    "page": documents[index][
+                        "page"
+                    ],
+
+                    "score": round(
+                        float(
+                            similarities[index]
+                        ),
+                        4
                     ),
-                    "content": documents[index]
+
+                    "content": documents[index][
+                        "content"
+                    ]
                 }
             )
 
@@ -256,18 +510,19 @@ def document_search(
         )
 
 
-# =========================
+# =========================================================
 # TOOLS
-# =========================
+# =========================================================
 
 tools = [
 
-    # =========================
+    # =====================================================
     # CALCULATOR
-    # =========================
+    # =====================================================
 
     {
         "type": "function",
+
         "function": {
 
             "name": "calculator",
@@ -299,13 +554,13 @@ tools = [
         }
     },
 
-
-    # =========================
+    # =====================================================
     # WEB SEARCH
-    # =========================
+    # =====================================================
 
     {
         "type": "function",
+
         "function": {
 
             "name": "web_search",
@@ -339,21 +594,23 @@ tools = [
         }
     },
 
-
-    # =========================
+    # =====================================================
     # DOCUMENT SEARCH
-    # =========================
+    # =====================================================
 
     {
         "type": "function",
+
         "function": {
 
             "name": "document_search",
 
             "description": (
                 "Search the loaded PDF document "
-                "for information relevant to "
-                "the user's question."
+                "for relevant information. "
+                "Use this tool whenever the user's "
+                "question depends on the uploaded "
+                "document."
             ),
 
             "parameters": {
@@ -367,8 +624,8 @@ tools = [
                         "type": "string",
 
                         "description":
-                            "Question to search "
-                            "inside the document."
+                            "Question or search query "
+                            "for the loaded document."
 
                     }
 
@@ -383,9 +640,9 @@ tools = [
 ]
 
 
-# =========================
+# =========================================================
 # AI AGENT
-# =========================
+# =========================================================
 
 class ResearchAgent:
 
@@ -397,20 +654,14 @@ class ResearchAgent:
 
         self.conversation_history = []
 
-        # =========================
-        # LAST ACTIVITY
-        # =========================
-
         self.last_activity = []
 
 
-    # =========================
+    # =====================================================
     # RUN AGENT
-    # =========================
+    # =====================================================
 
     def run(self, goal):
-
-        # Reset activity for new request
 
         self.last_activity = []
 
@@ -427,65 +678,76 @@ class ResearchAgent:
                     "and complete it using the "
                     "available tools when necessary. "
 
-                    "Use the calculator for "
-                    "mathematical calculations. "
+                    "Use calculator for mathematical "
+                    "calculations. "
 
-                    "Use web_search for current "
-                    "or external information. "
+                    "Use web_search for current, "
+                    "external, or web-based information. "
 
-                    "Use document_search when the "
-                    "answer should come from the "
-                    "loaded document. "
+                    "Use document_search whenever "
+                    "the answer should come from the "
+                    "uploaded document. "
 
-                    "Choose the most appropriate "
-                    "tool for the user's request. "
+                    "You may use multiple tools and "
+                    "multiple tool calls when needed. "
 
-                    "You may use multiple tools "
-                    "and multiple tool calls when "
-                    "needed. "
+                    "Continue working until the user's "
+                    "goal is fully completed. "
 
-                    "Continue working until the "
-                    "user's goal is fully completed. "
+                    "When answering questions about "
+                    "the uploaded document, rely only "
+                    "on information returned by "
+                    "document_search. "
 
-                    "Use previous conversation "
-                    "context when it is relevant. "
+                    "Do not invent document facts. "
 
-                    "When web_search is used, base "
-                    "your answer on the returned "
-                    "search results. "
+                    "If the retrieved document content "
+                    "does not contain enough information "
+                    "to answer confidently, clearly "
+                    "say that the information could "
+                    "not be found in the document. "
 
-                    "Include a Sources section "
-                    "when web_search is used. "
+                    "When document_search returns page "
+                    "numbers, mention the relevant "
+                    "page numbers in the answer when "
+                    "useful. "
 
-                    "Use URLs exactly as returned "
-                    "by the search tool. "
+                    "When multiple retrieved sections "
+                    "are relevant, combine them carefully "
+                    "to answer the question. "
+
+                    "Do not claim that a fact came from "
+                    "the document unless it was retrieved "
+                    "from the document. "
+
+                    "When web_search is used, base the "
+                    "answer on the returned results. "
+
+                    "Include a Sources section when "
+                    "web_search is used. "
+
+                    "Use URLs exactly as returned by "
+                    "the search tool. "
 
                     "Never invent sources or URLs. "
 
-                    "When document_search is used, "
-                    "base the answer on the retrieved "
-                    "document content. "
-
-                    "Do not claim information comes "
-                    "from a document if it was not "
-                    "retrieved from the document."
+                    "Use previous conversation context "
+                    "when it is relevant."
                 )
             }
         ]
 
-
-        # =========================
+        # =================================================
         # ADD MEMORY
-        # =========================
+        # =================================================
 
         messages.extend(
             self.conversation_history
         )
 
-
-        # =========================
+        # =================================================
         # CURRENT REQUEST
-        # =========================
+        # =================================================
 
         messages.append(
             {
@@ -494,10 +756,9 @@ class ResearchAgent:
             }
         )
 
-
-        # =========================
+        # =================================================
         # MULTI-STEP LOOP
-        # =========================
+        # =================================================
 
         max_iterations = 5
 
@@ -522,23 +783,24 @@ class ResearchAgent:
                 )
             )
 
-
             message = (
                 response.choices[0].message
             )
 
-
-            # =========================
+            # =================================================
             # FINAL ANSWER
-            # =========================
+            # =================================================
 
             if not message.tool_calls:
 
                 final_answer = (
                     message.content
+                    or "No response received."
                 )
 
-                # Save memory
+                # -------------------------------------------------
+                # SAVE MEMORY
+                # -------------------------------------------------
 
                 self.conversation_history.append(
                     {
@@ -554,27 +816,23 @@ class ResearchAgent:
                     }
                 )
 
-                # Keep last 10 messages
-
                 self.conversation_history = (
                     self.conversation_history[-10:]
                 )
 
                 return final_answer
 
-
-            # =========================
+            # =================================================
             # ADD TOOL CALL
-            # =========================
+            # =================================================
 
             messages.append(
                 message
             )
 
-
-            # =========================
+            # =================================================
             # EXECUTE TOOLS
-            # =========================
+            # =================================================
 
             for tool_call in message.tool_calls:
 
@@ -582,37 +840,43 @@ class ResearchAgent:
                     tool_call.function.name
                 )
 
-
-                # =========================
-                # TOOL ACTIVITY
-                # =========================
+                # =================================================
+                # ACTIVITY MAP
+                # =================================================
 
                 activity_map = {
 
                     "calculator": {
+
                         "tool": "calculator",
+
                         "label": "Calculator",
+
                         "icon": "calculator"
                     },
 
                     "web_search": {
+
                         "tool": "web_search",
+
                         "label": "Web Search",
+
                         "icon": "globe"
                     },
 
                     "document_search": {
+
                         "tool": "document_search",
+
                         "label": "Document Search",
+
                         "icon": "file"
                     }
                 }
 
-
                 activity = activity_map.get(
                     function_name
                 )
-
 
                 if activity:
 
@@ -638,10 +902,9 @@ class ResearchAgent:
                         }
                     )
 
-
-                # =========================
+                # =================================================
                 # PARSE ARGUMENTS
-                # =========================
+                # =================================================
 
                 try:
 
@@ -669,10 +932,9 @@ class ResearchAgent:
 
                     continue
 
-
-                # =========================
+                # =================================================
                 # CALCULATOR
-                # =========================
+                # =================================================
 
                 if function_name == "calculator":
 
@@ -682,10 +944,9 @@ class ResearchAgent:
                         ]
                     )
 
-
-                # =========================
+                # =================================================
                 # WEB SEARCH
-                # =========================
+                # =================================================
 
                 elif function_name == "web_search":
 
@@ -695,10 +956,9 @@ class ResearchAgent:
                         ]
                     )
 
-
-                # =========================
+                # =================================================
                 # DOCUMENT SEARCH
-                # =========================
+                # =================================================
 
                 elif function_name == "document_search":
 
@@ -708,10 +968,9 @@ class ResearchAgent:
                         ]
                     )
 
-
-                # =========================
+                # =================================================
                 # UNKNOWN TOOL
-                # =========================
+                # =================================================
 
                 else:
 
@@ -719,10 +978,9 @@ class ResearchAgent:
                         "Unknown tool."
                     )
 
-
-                # =========================
+                # =================================================
                 # RETURN TOOL RESULT
-                # =========================
+                # =================================================
 
                 messages.append(
                     {
@@ -736,10 +994,9 @@ class ResearchAgent:
                     }
                 )
 
-
-        # =========================
+        # =================================================
         # MAX ITERATIONS
-        # =========================
+        # =================================================
 
         return (
             "The agent reached the maximum "
@@ -748,9 +1005,9 @@ class ResearchAgent:
         )
 
 
-# =========================
+# =========================================================
 # AGENT INSTANCE
-# =========================
+# =========================================================
 
 agent = ResearchAgent()
 
