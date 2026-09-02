@@ -1,3 +1,5 @@
+fastapi
+uvicorn
 groq
 tavily-python
 python-dotenv
