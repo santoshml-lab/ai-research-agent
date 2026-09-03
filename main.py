@@ -49,6 +49,16 @@ class AgentRequest(BaseModel):
         description="Relevant document page numbers used as ground truth for evaluation."
     )
 
+class EvaluationRequest(BaseModel):
+
+    questions: list[dict] = Field(
+        ...,
+        description=(
+            "List of evaluation questions. "
+            "Each item must contain question and expected_pages."
+        )
+    )
+
 
 # =========================================================
 # ROOT
@@ -396,6 +406,164 @@ def evaluate_retrieval(
                 f"Evaluation error: {error}"
             )
         }
+
+def evaluate_multiple(
+    questions
+):
+
+    results = []
+
+    total_precision = 0.0
+    total_recall = 0.0
+    total_f1 = 0.0
+
+    completed_tests = 0
+
+    for item in questions:
+
+        question = item.get(
+            "question"
+        )
+
+        expected_pages = item.get(
+            "expected_pages"
+        )
+
+        if not question or not expected_pages:
+
+            results.append(
+                {
+                    "status": "error",
+                    "message": (
+                        "Each test must contain "
+                        "question and expected_pages."
+                    )
+                }
+            )
+
+            continue
+
+        evaluation = evaluate_retrieval(
+            question,
+            expected_pages
+        )
+
+        results.append(
+            {
+                "question": question,
+                **evaluation
+            }
+        )
+
+        if evaluation.get(
+            "status"
+        ) == "completed":
+
+            precision = evaluation.get(
+                "precision",
+                0.0
+            )
+
+            recall = evaluation.get(
+                "recall",
+                0.0
+            )
+
+            f1_score = evaluation.get(
+                "f1_score",
+                0.0
+            )
+
+            total_precision += precision
+            total_recall += recall
+            total_f1 += f1_score
+
+            completed_tests += 1
+
+    if completed_tests > 0:
+
+        average_precision = (
+            total_precision
+            /
+            completed_tests
+        )
+
+        average_recall = (
+            total_recall
+            /
+            completed_tests
+        )
+
+        average_f1 = (
+            total_f1
+            /
+            completed_tests
+        )
+
+    else:
+
+        average_precision = 0.0
+        average_recall = 0.0
+        average_f1 = 0.0
+
+    return {
+
+        "status": "completed",
+
+        "total_tests": len(
+            questions
+        ),
+
+        "completed_tests": completed_tests,
+
+        "average_precision": round(
+            average_precision,
+            4
+        ),
+
+        "average_recall": round(
+            average_recall,
+            4
+        ),
+
+        "average_f1_score": round(
+            average_f1,
+            4
+        ),
+
+        "tests": results
+    }
+
+# =========================================================
+# MULTI-QUESTION RAG EVALUATION
+# =========================================================
+
+@app.post("/evaluate")
+def evaluate_agent(
+    request: EvaluationRequest
+):
+
+    if not request.questions:
+
+        raise HTTPException(
+            status_code=400,
+            detail="At least one evaluation question is required."
+        )
+
+    try:
+
+        evaluation = evaluate_multiple(
+            request.questions
+        )
+
+        return evaluation
+
+    except Exception as error:
+
+        raise HTTPException(
+            status_code=500,
+            detail=str(error)
+        )
 
 
 # =========================================================
