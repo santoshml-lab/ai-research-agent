@@ -1,9 +1,9 @@
 fastapi
 uvicorn
-python-multipart
 groq
 tavily-python
 python-dotenv
 pypdf
 scikit-learn
 scipy
+python-multipart
