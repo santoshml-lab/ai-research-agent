@@ -142,9 +142,10 @@ document_vectors = None
 # =========================================================
 
 CHUNK_SIZE = 1200
+
 CHUNK_OVERLAP = 200
 
-DEFAULT_TOP_K = 6
+DEFAULT_TOP_K = 3
 
 MIN_RELEVANCE_SCORE = 0.03
 
@@ -184,6 +185,7 @@ def create_chunks(
     text = clean_text(text)
 
     if not text:
+
         return []
 
     chunks = []
@@ -218,6 +220,7 @@ def create_chunks(
             )
 
         if end >= text_length:
+
             break
 
         start = end - CHUNK_OVERLAP
@@ -232,6 +235,7 @@ def create_chunks(
 def load_document(file_path):
 
     global documents
+
     global document_vectors
 
     try:
@@ -254,6 +258,7 @@ def load_document(file_path):
             page_text = page.extract_text()
 
             if not page_text:
+
                 continue
 
             page_chunks = create_chunks(
@@ -264,6 +269,10 @@ def load_document(file_path):
             new_documents.extend(
                 page_chunks
             )
+
+        # -------------------------------------------------
+        # CHECK DOCUMENT
+        # -------------------------------------------------
 
         if not new_documents:
 
@@ -305,7 +314,7 @@ def load_document(file_path):
         )
 
         # -------------------------------------------------
-        # COMBINE WORD + CHARACTER FEATURES
+        # COMBINE FEATURES
         # -------------------------------------------------
 
         document_vectors = hstack(
@@ -318,7 +327,8 @@ def load_document(file_path):
         return (
             f"Document loaded successfully. "
             f"Pages: {len(reader.pages)}. "
-            f"Created {len(documents)} overlapping chunks."
+            f"Created {len(documents)} "
+            f"overlapping chunks."
         )
 
     except Exception as error:
@@ -354,7 +364,7 @@ def document_search(
     try:
 
         # -------------------------------------------------
-        # CREATE QUERY VECTORS
+        # QUERY WORD VECTOR
         # -------------------------------------------------
 
         query_word_vector = (
@@ -363,11 +373,19 @@ def document_search(
             )
         )
 
+        # -------------------------------------------------
+        # QUERY CHARACTER VECTOR
+        # -------------------------------------------------
+
         query_char_vector = (
             char_vectorizer.transform(
                 [query]
             )
         )
+
+        # -------------------------------------------------
+        # COMBINE QUERY FEATURES
+        # -------------------------------------------------
 
         query_vector = hstack(
             [
@@ -390,9 +408,7 @@ def document_search(
         # -------------------------------------------------
 
         ranked_indexes = (
-            similarities.argsort()[
-                ::-1
-            ]
+            similarities.argsort()[::-1]
         )
 
         selected_indexes = []
@@ -411,11 +427,9 @@ def document_search(
 
                 continue
 
-            if index not in selected_indexes:
-
-                selected_indexes.append(
-                    int(index)
-                )
+            selected_indexes.append(
+                int(index)
+            )
 
             if len(selected_indexes) >= top_k:
 
@@ -468,7 +482,7 @@ def document_search(
                 )
 
         # -------------------------------------------------
-        # SORT BY ORIGINAL DOCUMENT ORDER
+        # SORT DOCUMENT ORDER
         # -------------------------------------------------
 
         final_indexes = sorted(
@@ -492,11 +506,16 @@ def document_search(
                         4
                     ),
 
+                    # Limit context size
                     "content": documents[index][
                         "content"
-                    ]
+                    ][:900]
                 }
             )
+
+        # -------------------------------------------------
+        # RETURN RESULTS
+        # -------------------------------------------------
 
         return json.dumps(
             results,
@@ -663,7 +682,15 @@ class ResearchAgent:
 
     def run(self, goal):
 
+        # -------------------------------------------------
+        # RESET ACTIVITY
+        # -------------------------------------------------
+
         self.last_activity = []
+
+        # -------------------------------------------------
+        # SYSTEM MESSAGE
+        # -------------------------------------------------
 
         messages = [
 
@@ -688,11 +715,12 @@ class ResearchAgent:
                     "the answer should come from the "
                     "uploaded document. "
 
-                    "You may use multiple tools and "
-                    "multiple tool calls when needed. "
+                    "You may use multiple tools "
+                    "and multiple tool calls when "
+                    "needed. "
 
-                    "Continue working until the user's "
-                    "goal is fully completed. "
+                    "Continue working until the "
+                    "user's goal is fully completed. "
 
                     "When answering questions about "
                     "the uploaded document, rely only "
@@ -766,6 +794,10 @@ class ResearchAgent:
             max_iterations
         ):
 
+            # -------------------------------------------------
+            # GROQ REQUEST
+            # -------------------------------------------------
+
             response = (
                 groq_client.chat.completions.create(
 
@@ -816,14 +848,18 @@ class ResearchAgent:
                     }
                 )
 
+                # -------------------------------------------------
+                # KEEP ONLY LAST 4 MESSAGES
+                # -------------------------------------------------
+
                 self.conversation_history = (
-                vvself.conversation_history = self.conversation_history[-4:]
+                    self.conversation_history[-4:]
                 )
 
                 return final_answer
 
             # =================================================
-            # ADD TOOL CALL
+            # ADD TOOL CALL MESSAGE
             # =================================================
 
             messages.append(
@@ -903,7 +939,7 @@ class ResearchAgent:
                     )
 
                 # =================================================
-                # PARSE ARGUMENTS
+                # PARSE TOOL ARGUMENTS
                 # =================================================
 
                 try:
@@ -979,7 +1015,7 @@ class ResearchAgent:
                     )
 
                 # =================================================
-                # RETURN TOOL RESULT
+                # RETURN TOOL RESULT TO MODEL
                 # =================================================
 
                 messages.append(
