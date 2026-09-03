@@ -817,7 +817,7 @@ class ResearchAgent:
                 )
 
                 self.conversation_history = (
-                    self.conversation_history[-10:]
+                vvself.conversation_history = self.conversation_history[-4:]
                 )
 
                 return final_answer
