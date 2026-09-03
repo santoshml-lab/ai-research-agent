@@ -1,20 +1,30 @@
 from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
-from agent import agent, load_document
+import json
 
-
-app = FastAPI(
-    title="AI Research Agent",
-    description="Agentic AI backend powered by Groq",
-    version="1.0.0"
+from agent import (
+    agent,
+    load_document,
+    document_search
 )
 
 
-# =========================
+# =========================================================
+# APP
+# =========================================================
+
+app = FastAPI(
+    title="AI Research Agent",
+    description="Agentic AI backend powered by Groq with RAG evaluation",
+    version="1.1.0"
+)
+
+
+# =========================================================
 # CORS
-# =========================
+# =========================================================
 
 app.add_middleware(
     CORSMiddleware,
@@ -25,17 +35,24 @@ app.add_middleware(
 )
 
 
-# =========================
+# =========================================================
 # REQUEST MODEL
-# =========================
+# =========================================================
 
 class AgentRequest(BaseModel):
+
     goal: str
 
+    # Optional ground-truth pages for RAG evaluation
+    expected_pages: list[int] | None = Field(
+        default=None,
+        description="Relevant document page numbers used as ground truth for evaluation."
+    )
 
-# =========================
+
+# =========================================================
 # ROOT
-# =========================
+# =========================================================
 
 @app.get("/")
 def root():
@@ -45,16 +62,18 @@ def root():
     }
 
 
-# =========================
+# =========================================================
 # PDF UPLOAD / RAG
-# =========================
+# =========================================================
 
 @app.post("/upload")
 async def upload_document(
     file: UploadFile = File(...)
 ):
 
-    # Check file type
+    # -----------------------------------------------------
+    # CHECK FILE TYPE
+    # -----------------------------------------------------
 
     if not file.filename.lower().endswith(".pdf"):
 
@@ -65,19 +84,28 @@ async def upload_document(
 
     try:
 
-        # Temporary file path
+        # -------------------------------------------------
+        # TEMPORARY FILE PATH
+        # -------------------------------------------------
 
         file_path = f"/tmp/{file.filename}"
 
-        # Save uploaded file
+        # -------------------------------------------------
+        # SAVE UPLOADED FILE
+        # -------------------------------------------------
 
         contents = await file.read()
 
-        with open(file_path, "wb") as buffer:
+        with open(
+            file_path,
+            "wb"
+        ) as buffer:
 
             buffer.write(contents)
 
-        # Load document into RAG
+        # -------------------------------------------------
+        # LOAD DOCUMENT
+        # -------------------------------------------------
 
         result = load_document(
             file_path
@@ -96,14 +124,292 @@ async def upload_document(
         )
 
 
-# =========================
+# =========================================================
+# RAG EVALUATION
+# =========================================================
+
+def evaluate_retrieval(
+    query,
+    expected_pages
+):
+
+    # -----------------------------------------------------
+    # VALIDATE GROUND TRUTH
+    # -----------------------------------------------------
+
+    if not expected_pages:
+
+        return {
+            "status": "not_available",
+            "message": (
+                "Evaluation requires expected_pages "
+                "as ground truth."
+            )
+        }
+
+    try:
+
+        expected_pages = set(
+            int(page)
+            for page in expected_pages
+        )
+
+        # -------------------------------------------------
+        # RETRIEVE DOCUMENT CHUNKS
+        # -------------------------------------------------
+
+        search_result = document_search(
+            query,
+            top_k=3
+        )
+
+        # -------------------------------------------------
+        # PARSE SEARCH RESULT
+        # -------------------------------------------------
+
+        if isinstance(
+            search_result,
+            str
+        ):
+
+            try:
+
+                retrieved_chunks = json.loads(
+                    search_result
+                )
+
+            except json.JSONDecodeError:
+
+                return {
+                    "status": "error",
+                    "message": (
+                        "Could not parse document "
+                        "search results."
+                    )
+                }
+
+        else:
+
+            retrieved_chunks = search_result
+
+        # -------------------------------------------------
+        # CHECK SEARCH ERROR
+        # -------------------------------------------------
+
+        if not isinstance(
+            retrieved_chunks,
+            list
+        ):
+
+            return {
+                "status": "error",
+                "message": str(
+                    search_result
+                )
+            }
+
+        # -------------------------------------------------
+        # RETRIEVED PAGES
+        # -------------------------------------------------
+
+        retrieved_pages = set()
+
+        for item in retrieved_chunks:
+
+            if isinstance(
+                item,
+                dict
+            ):
+
+                page = item.get(
+                    "page"
+                )
+
+                if page is not None:
+
+                    retrieved_pages.add(
+                        int(page)
+                    )
+
+        # -------------------------------------------------
+        # NO RETRIEVAL
+        # -------------------------------------------------
+
+        if not retrieved_pages:
+
+            return {
+                "status": "completed",
+
+                "expected_pages": sorted(
+                    expected_pages
+                ),
+
+                "retrieved_pages": [],
+
+                "precision": 0.0,
+
+                "recall": 0.0,
+
+                "f1_score": 0.0
+            }
+
+        # -------------------------------------------------
+        # TRUE POSITIVE PAGES
+        # -------------------------------------------------
+
+        true_positive = (
+            expected_pages
+            &
+            retrieved_pages
+        )
+
+        # -------------------------------------------------
+        # FALSE POSITIVE PAGES
+        # -------------------------------------------------
+
+        false_positive = (
+            retrieved_pages
+            -
+            expected_pages
+        )
+
+        # -------------------------------------------------
+        # FALSE NEGATIVE PAGES
+        # -------------------------------------------------
+
+        false_negative = (
+            expected_pages
+            -
+            retrieved_pages
+        )
+
+        # -------------------------------------------------
+        # PRECISION
+        # -------------------------------------------------
+
+        if retrieved_pages:
+
+            precision = (
+                len(true_positive)
+                /
+                len(retrieved_pages)
+            )
+
+        else:
+
+            precision = 0.0
+
+        # -------------------------------------------------
+        # RECALL
+        # -------------------------------------------------
+
+        if expected_pages:
+
+            recall = (
+                len(true_positive)
+                /
+                len(expected_pages)
+            )
+
+        else:
+
+            recall = 0.0
+
+        # -------------------------------------------------
+        # F1 SCORE
+        # -------------------------------------------------
+
+        if (
+            precision + recall
+            > 0
+        ):
+
+            f1_score = (
+                2
+                *
+                precision
+                *
+                recall
+                /
+                (
+                    precision
+                    +
+                    recall
+                )
+            )
+
+        else:
+
+            f1_score = 0.0
+
+        # -------------------------------------------------
+        # RETURN EVALUATION
+        # -------------------------------------------------
+
+        return {
+
+            "status": "completed",
+
+            "expected_pages": sorted(
+                expected_pages
+            ),
+
+            "retrieved_pages": sorted(
+                retrieved_pages
+            ),
+
+            "true_positive_pages": sorted(
+                true_positive
+            ),
+
+            "false_positive_pages": sorted(
+                false_positive
+            ),
+
+            "false_negative_pages": sorted(
+                false_negative
+            ),
+
+            "precision": round(
+                precision,
+                4
+            ),
+
+            "recall": round(
+                recall,
+                4
+            ),
+
+            "f1_score": round(
+                f1_score,
+                4
+            )
+        }
+
+    except Exception as error:
+
+        return {
+
+            "status": "error",
+
+            "message": (
+                f"Evaluation error: {error}"
+            )
+        }
+
+
+# =========================================================
 # AGENT
-# =========================
+# =========================================================
 
 @app.post("/agent")
 def run_agent(
     request: AgentRequest
 ):
+
+    # -----------------------------------------------------
+    # VALIDATE GOAL
+    # -----------------------------------------------------
 
     if not request.goal.strip():
 
@@ -114,15 +420,41 @@ def run_agent(
 
     try:
 
+        # -------------------------------------------------
+        # RUN AGENT
+        # -------------------------------------------------
+
         result = agent.run(
             request.goal
         )
 
-        return {
+        # -------------------------------------------------
+        # BASE RESPONSE
+        # -------------------------------------------------
+
+        response = {
+
             "goal": request.goal,
+
             "result": result,
+
             "activity": agent.last_activity
         }
+
+        # -------------------------------------------------
+        # OPTIONAL EVALUATION
+        # -------------------------------------------------
+
+        if request.expected_pages is not None:
+
+            response[
+                "evaluation"
+            ] = evaluate_retrieval(
+                request.goal,
+                request.expected_pages
+            )
+
+        return response
 
     except Exception as error:
 
