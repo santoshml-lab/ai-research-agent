@@ -1,6 +1,7 @@
 import os
 import json
 import re
+import math
 
 from dotenv import load_dotenv
 from groq import Groq
@@ -41,7 +42,10 @@ def calculator(expression):
 
     allowed = "0123456789+-*/(). "
 
-    if not all(char in allowed for char in expression):
+    if not all(
+        char in allowed
+        for char in expression
+    ):
         return "Invalid mathematical expression."
 
     try:
@@ -93,10 +97,12 @@ def web_search(query):
                         ""
                     ),
 
+                    # Limit web content
+                    # to avoid huge model requests
                     "content": result.get(
                         "content",
                         ""
-                    ),
+                    )[:1800],
 
                     "url": result.get(
                         "url",
@@ -105,10 +111,13 @@ def web_search(query):
                 }
             )
 
-        return json.dumps(
+        output = json.dumps(
             formatted_results,
             ensure_ascii=False
         )
+
+        # Final safety limit
+        return output[:7000]
 
     except Exception as error:
 
@@ -121,11 +130,21 @@ def web_search(query):
 
 documents = []
 
+
+# =========================================================
+# WORD TF-IDF
+# =========================================================
+
 word_vectorizer = TfidfVectorizer(
     stop_words="english",
     ngram_range=(1, 2),
     sublinear_tf=True
 )
+
+
+# =========================================================
+# CHARACTER TF-IDF
+# =========================================================
 
 char_vectorizer = TfidfVectorizer(
     analyzer="char",
@@ -133,6 +152,7 @@ char_vectorizer = TfidfVectorizer(
     min_df=1,
     sublinear_tf=True
 )
+
 
 document_vectors = None
 
@@ -151,12 +171,31 @@ MIN_RELEVANCE_SCORE = 0.03
 
 
 # =========================================================
+# MODEL CONTEXT LIMITS
+# =========================================================
+
+# Maximum number of characters sent from
+# retrieved document context to the LLM.
+MAX_DOCUMENT_CONTEXT_CHARS = 6500
+
+# Maximum characters for one conversation message.
+MAX_HISTORY_MESSAGE_CHARS = 1200
+
+# Number of previous messages retained.
+MAX_HISTORY_MESSAGES = 4
+
+# Maximum number of tool iterations.
+MAX_AGENT_ITERATIONS = 4
+
+
+# =========================================================
 # TEXT CLEANING
 # =========================================================
 
 def clean_text(text):
 
     if not text:
+
         return ""
 
     text = text.replace(
@@ -235,7 +274,6 @@ def create_chunks(
 def load_document(file_path):
 
     global documents
-
     global document_vectors
 
     try:
@@ -288,15 +326,21 @@ def load_document(file_path):
         documents = new_documents
 
         # -------------------------------------------------
+        # DOCUMENT CONTENT
+        # -------------------------------------------------
+
+        contents = [
+            item["content"]
+            for item in documents
+        ]
+
+        # -------------------------------------------------
         # WORD TF-IDF
         # -------------------------------------------------
 
         word_vectors = (
             word_vectorizer.fit_transform(
-                [
-                    item["content"]
-                    for item in documents
-                ]
+                contents
             )
         )
 
@@ -306,10 +350,7 @@ def load_document(file_path):
 
         char_vectors = (
             char_vectorizer.fit_transform(
-                [
-                    item["content"]
-                    for item in documents
-                ]
+                contents
             )
         )
 
@@ -414,7 +455,7 @@ def document_search(
         selected_indexes = []
 
         # -------------------------------------------------
-        # SELECT RELEVANT CHUNKS
+        # SELECT TOP RELEVANT CHUNKS
         # -------------------------------------------------
 
         for index in ranked_indexes:
@@ -491,7 +532,37 @@ def document_search(
 
         results = []
 
+        current_chars = 0
+
+        # -------------------------------------------------
+        # BUILD BOUNDED CONTEXT
+        # -------------------------------------------------
+
         for index in final_indexes:
+
+            content = documents[index][
+                "content"
+            ]
+
+            remaining = (
+                MAX_DOCUMENT_CONTEXT_CHARS
+                - current_chars
+            )
+
+            if remaining <= 0:
+
+                break
+
+            content = content[
+                :min(
+                    900,
+                    remaining
+                )
+            ]
+
+            if not content:
+
+                continue
 
             results.append(
                 {
@@ -506,11 +577,12 @@ def document_search(
                         4
                     ),
 
-                    # Limit context size
-                    "content": documents[index][
-                        "content"
-                    ][:900]
+                    "content": content
                 }
+            )
+
+            current_chars += len(
+                content
             )
 
         # -------------------------------------------------
@@ -527,6 +599,342 @@ def document_search(
         return (
             f"Document search error: {error}"
         )
+
+
+# =========================================================
+# RETRIEVAL EVALUATION
+# =========================================================
+#
+# Each evaluation item should look like:
+#
+# {
+#     "query": "What is acceleration?",
+#     "relevant_pages": [7]
+# }
+#
+# OR:
+#
+# {
+#     "query": "What is distance?",
+#     "relevant_pages": [2]
+# }
+#
+# =========================================================
+
+def _retrieve_ranked_indexes(query):
+
+    if (
+        not documents
+        or document_vectors is None
+    ):
+
+        return []
+
+    query_word_vector = (
+        word_vectorizer.transform(
+            [query]
+        )
+    )
+
+    query_char_vector = (
+        char_vectorizer.transform(
+            [query]
+        )
+    )
+
+    query_vector = hstack(
+        [
+            query_word_vector,
+            query_char_vector
+        ]
+    ).tocsr()
+
+    similarities = cosine_similarity(
+        query_vector,
+        document_vectors
+    )[0]
+
+    ranked_indexes = (
+        similarities.argsort()[::-1]
+    )
+
+    return [
+        int(index)
+        for index in ranked_indexes
+    ]
+
+
+# =========================================================
+# HIT@K
+# =========================================================
+
+def hit_at_k(
+    retrieved_pages,
+    relevant_pages,
+    k=3
+):
+
+    retrieved = set(
+        retrieved_pages[:k]
+    )
+
+    relevant = set(
+        relevant_pages
+    )
+
+    return int(
+        len(retrieved.intersection(
+            relevant
+        )) > 0
+    )
+
+
+# =========================================================
+# PRECISION@K
+# =========================================================
+
+def precision_at_k(
+    retrieved_pages,
+    relevant_pages,
+    k=3
+):
+
+    retrieved = retrieved_pages[:k]
+
+    if not retrieved:
+
+        return 0.0
+
+    relevant = set(
+        relevant_pages
+    )
+
+    hits = sum(
+        1
+        for page in retrieved
+        if page in relevant
+    )
+
+    return hits / len(
+        retrieved
+    )
+
+
+# =========================================================
+# RECALL@K
+# =========================================================
+
+def recall_at_k(
+    retrieved_pages,
+    relevant_pages,
+    k=3
+):
+
+    if not relevant_pages:
+
+        return 0.0
+
+    retrieved = set(
+        retrieved_pages[:k]
+    )
+
+    relevant = set(
+        relevant_pages
+    )
+
+    hits = len(
+        retrieved.intersection(
+            relevant
+        )
+    )
+
+    return hits / len(
+        relevant
+    )
+
+
+# =========================================================
+# MRR
+# =========================================================
+
+def reciprocal_rank(
+    retrieved_pages,
+    relevant_pages
+):
+
+    relevant = set(
+        relevant_pages
+    )
+
+    for rank, page in enumerate(
+        retrieved_pages,
+        start=1
+    ):
+
+        if page in relevant:
+
+            return 1.0 / rank
+
+    return 0.0
+
+
+# =========================================================
+# EVALUATE RETRIEVAL
+# =========================================================
+
+def evaluate_retrieval(
+    evaluation_data,
+    k=3
+):
+
+    if not evaluation_data:
+
+        return {
+            "queries": 0,
+            "precision_at_k": 0.0,
+            "recall_at_k": 0.0,
+            "hit_at_k": 0.0,
+            "mrr": 0.0
+        }
+
+    precision_scores = []
+
+    recall_scores = []
+
+    hit_scores = []
+
+    mrr_scores = []
+
+    details = []
+
+    for item in evaluation_data:
+
+        query = item.get(
+            "query",
+            ""
+        )
+
+        relevant_pages = item.get(
+            "relevant_pages",
+            []
+        )
+
+        if not query:
+
+            continue
+
+        ranked_indexes = (
+            _retrieve_ranked_indexes(
+                query
+            )
+        )
+
+        retrieved_pages = [
+            documents[index]["page"]
+            for index in ranked_indexes
+        ]
+
+        p = precision_at_k(
+            retrieved_pages,
+            relevant_pages,
+            k
+        )
+
+        r = recall_at_k(
+            retrieved_pages,
+            relevant_pages,
+            k
+        )
+
+        h = hit_at_k(
+            retrieved_pages,
+            relevant_pages,
+            k
+        )
+
+        m = reciprocal_rank(
+            retrieved_pages,
+            relevant_pages
+        )
+
+        precision_scores.append(p)
+
+        recall_scores.append(r)
+
+        hit_scores.append(h)
+
+        mrr_scores.append(m)
+
+        details.append(
+            {
+                "query": query,
+
+                "relevant_pages":
+                    relevant_pages,
+
+                "retrieved_pages":
+                    retrieved_pages[:k],
+
+                "precision_at_k":
+                    round(p, 4),
+
+                "recall_at_k":
+                    round(r, 4),
+
+                "hit_at_k":
+                    h,
+
+                "reciprocal_rank":
+                    round(m, 4)
+            }
+        )
+
+    count = len(
+        precision_scores
+    )
+
+    if count == 0:
+
+        return {
+            "queries": 0,
+            "precision_at_k": 0.0,
+            "recall_at_k": 0.0,
+            "hit_at_k": 0.0,
+            "mrr": 0.0,
+            "details": []
+        }
+
+    return {
+        "queries": count,
+
+        "k": k,
+
+        "precision_at_k": round(
+            sum(precision_scores)
+            / count,
+            4
+        ),
+
+        "recall_at_k": round(
+            sum(recall_scores)
+            / count,
+            4
+        ),
+
+        "hit_at_k": round(
+            sum(hit_scores)
+            / count,
+            4
+        ),
+
+        "mrr": round(
+            sum(mrr_scores)
+            / count,
+            4
+        ),
+
+        "details": details
+    }
 
 
 # =========================================================
@@ -677,20 +1085,55 @@ class ResearchAgent:
 
 
     # =====================================================
+    # SAFE HISTORY
+    # =====================================================
+
+    def _get_safe_history(self):
+
+        safe_history = []
+
+        for message in self.conversation_history[
+            -MAX_HISTORY_MESSAGES:
+        ]:
+
+            content = message.get(
+                "content",
+                ""
+            )
+
+            if isinstance(
+                content,
+                str
+            ):
+
+                content = content[
+                    :MAX_HISTORY_MESSAGE_CHARS
+                ]
+
+            safe_history.append(
+                {
+                    "role": message.get(
+                        "role"
+                    ),
+
+                    "content": content
+                }
+            )
+
+        return safe_history
+
+
+    # =====================================================
     # RUN AGENT
     # =====================================================
 
     def run(self, goal):
 
-        # -------------------------------------------------
-        # RESET ACTIVITY
-        # -------------------------------------------------
-
         self.last_activity = []
 
-        # -------------------------------------------------
+        # =================================================
         # SYSTEM MESSAGE
-        # -------------------------------------------------
+        # =================================================
 
         messages = [
 
@@ -715,62 +1158,50 @@ class ResearchAgent:
                     "the answer should come from the "
                     "uploaded document. "
 
-                    "You may use multiple tools "
-                    "and multiple tool calls when "
-                    "needed. "
+                    "For document questions, use "
+                    "document_search before answering. "
 
-                    "Continue working until the "
-                    "user's goal is fully completed. "
-
-                    "When answering questions about "
-                    "the uploaded document, rely only "
-                    "on information returned by "
-                    "document_search. "
+                    "When document_search is used, "
+                    "answer using the retrieved "
+                    "document content. "
 
                     "Do not invent document facts. "
 
-                    "If the retrieved document content "
-                    "does not contain enough information "
-                    "to answer confidently, clearly "
-                    "say that the information could "
-                    "not be found in the document. "
+                    "Mention retrieved page numbers "
+                    "when useful or requested. "
 
-                    "When document_search returns page "
-                    "numbers, mention the relevant "
-                    "page numbers in the answer when "
-                    "useful. "
+                    "If the retrieved content is not "
+                    "sufficient, clearly state that "
+                    "the information could not be "
+                    "found in the retrieved document. "
 
-                    "When multiple retrieved sections "
-                    "are relevant, combine them carefully "
-                    "to answer the question. "
+                    "When multiple document sections "
+                    "are retrieved, combine them "
+                    "carefully. "
 
-                    "Do not claim that a fact came from "
-                    "the document unless it was retrieved "
-                    "from the document. "
-
-                    "When web_search is used, base the "
-                    "answer on the returned results. "
+                    "When web_search is used, base "
+                    "the answer on returned results. "
 
                     "Include a Sources section when "
                     "web_search is used. "
 
-                    "Use URLs exactly as returned by "
-                    "the search tool. "
-
-                    "Never invent sources or URLs. "
+                    "Never invent URLs. "
 
                     "Use previous conversation context "
-                    "when it is relevant."
+                    "only when relevant. "
+
+                    "Keep answers concise and directly "
+                    "answer the user's question."
                 )
             }
         ]
 
         # =================================================
-        # ADD MEMORY
+        # ADD SAFE MEMORY
         # =================================================
 
         messages.extend(
-            self.conversation_history
+            self._get_safe_history()
         )
 
         # =================================================
@@ -780,7 +1211,7 @@ class ResearchAgent:
         messages.append(
             {
                 "role": "user",
-                "content": goal
+                "content": goal[:3000]
             }
         )
 
@@ -788,32 +1219,60 @@ class ResearchAgent:
         # MULTI-STEP LOOP
         # =================================================
 
-        max_iterations = 5
-
         for iteration in range(
-            max_iterations
+            MAX_AGENT_ITERATIONS
         ):
 
-            # -------------------------------------------------
-            # GROQ REQUEST
-            # -------------------------------------------------
+            try:
 
-            response = (
-                groq_client.chat.completions.create(
+                # -------------------------------------------------
+                # GROQ REQUEST
+                # -------------------------------------------------
 
-                    model="openai/gpt-oss-20b",
+                response = (
+                    groq_client.chat.completions.create(
 
-                    messages=messages,
+                        model="openai/gpt-oss-20b",
 
-                    tools=tools,
+                        messages=messages,
 
-                    tool_choice="auto",
+                        tools=tools,
 
-                    parallel_tool_calls=False,
+                        tool_choice="auto",
 
-                    temperature=0.2
+                        parallel_tool_calls=False,
+
+                        temperature=0.2,
+
+                        max_tokens=1200
+                    )
                 )
-            )
+
+            except Exception as error:
+
+                error_text = str(error)
+
+                # -------------------------------------------------
+                # FRIENDLY TPM ERROR
+                # -------------------------------------------------
+
+                if (
+                    "413" in error_text
+                    or "tokens per minute"
+                    in error_text.lower()
+                    or "rate_limit" in error_text.lower()
+                ):
+
+                    return (
+                        "The request was too large "
+                        "for the current model limit. "
+                        "Please try the question again "
+                        "with a shorter query."
+                    )
+
+                return (
+                    f"AI request error: {error_text}"
+                )
 
             message = (
                 response.choices[0].message
@@ -837,23 +1296,31 @@ class ResearchAgent:
                 self.conversation_history.append(
                     {
                         "role": "user",
-                        "content": goal
+
+                        "content": goal[
+                            :MAX_HISTORY_MESSAGE_CHARS
+                        ]
                     }
                 )
 
                 self.conversation_history.append(
                     {
                         "role": "assistant",
-                        "content": final_answer
+
+                        "content": final_answer[
+                            :MAX_HISTORY_MESSAGE_CHARS
+                        ]
                     }
                 )
 
                 # -------------------------------------------------
-                # KEEP ONLY LAST 4 MESSAGES
+                # KEEP MEMORY SMALL
                 # -------------------------------------------------
 
                 self.conversation_history = (
-                    self.conversation_history[-4:]
+                    self.conversation_history[
+                        -MAX_HISTORY_MESSAGES:
+                    ]
                 )
 
                 return final_answer
@@ -948,7 +1415,10 @@ class ResearchAgent:
                         tool_call.function.arguments
                     )
 
-                except json.JSONDecodeError:
+                except (
+                    json.JSONDecodeError,
+                    TypeError
+                ):
 
                     result = (
                         "Invalid tool arguments."
@@ -975,9 +1445,10 @@ class ResearchAgent:
                 if function_name == "calculator":
 
                     result = calculator(
-                        arguments[
-                            "expression"
-                        ]
+                        arguments.get(
+                            "expression",
+                            ""
+                        )
                     )
 
                 # =================================================
@@ -987,9 +1458,10 @@ class ResearchAgent:
                 elif function_name == "web_search":
 
                     result = web_search(
-                        arguments[
-                            "query"
-                        ]
+                        arguments.get(
+                            "query",
+                            ""
+                        )
                     )
 
                 # =================================================
@@ -999,9 +1471,10 @@ class ResearchAgent:
                 elif function_name == "document_search":
 
                     result = document_search(
-                        arguments[
-                            "query"
-                        ]
+                        arguments.get(
+                            "query",
+                            ""
+                        )
                     )
 
                 # =================================================
@@ -1015,7 +1488,20 @@ class ResearchAgent:
                     )
 
                 # =================================================
-                # RETURN TOOL RESULT TO MODEL
+                # SAFETY LIMIT TOOL RESULT
+                # =================================================
+
+                if isinstance(
+                    result,
+                    str
+                ):
+
+                    result = result[
+                        :8000
+                    ]
+
+                # =================================================
+                # RETURN TOOL RESULT
                 # =================================================
 
                 messages.append(
@@ -1036,8 +1522,8 @@ class ResearchAgent:
 
         return (
             "The agent reached the maximum "
-            "number of tool steps without "
-            "completing the task."
+            "number of tool steps. "
+            "Please try a more focused question."
         )
 
 
