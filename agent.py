@@ -95,10 +95,12 @@ def web_search(query):
                         "title",
                         ""
                     ),
+
                     "content": result.get(
                         "content",
                         ""
                     ),
+
                     "url": result.get(
                         "url",
                         ""
@@ -142,17 +144,20 @@ document_vectors = None
 # CHUNK SETTINGS
 # =========================================================
 
-CHUNK_SIZE = 1200
+CHUNK_SIZE = 1000
 
-CHUNK_OVERLAP = 200
+CHUNK_OVERLAP = 150
 
-DEFAULT_TOP_K = 3
+DEFAULT_TOP_K = 4
 
-MIN_RELEVANCE_SCORE = 0.05
+MIN_RELEVANCE_SCORE = 0.03
 
-# Only add a second chunk when its score is
-# reasonably close to the best result.
-SECONDARY_SCORE_RATIO = 0.65
+# ---------------------------------------------------------
+# A chunk must have a reasonable fraction of the best
+# score before it can be selected.
+# ---------------------------------------------------------
+
+SECONDARY_SCORE_RATIO = 0.50
 
 
 # =========================================================
@@ -162,6 +167,7 @@ SECONDARY_SCORE_RATIO = 0.65
 def clean_text(text):
 
     if not text:
+
         return ""
 
     text = text.replace(
@@ -215,8 +221,11 @@ def create_chunks(
             chunks.append(
                 {
                     "page": page_number,
+
                     "content": chunk_text,
+
                     "chunk_start": start,
+
                     "chunk_end": end
                 }
             )
@@ -248,7 +257,7 @@ def load_document(file_path):
         new_documents = []
 
         # -------------------------------------------------
-        # READ PDF PAGE BY PAGE
+        # READ PAGE BY PAGE
         # -------------------------------------------------
 
         for page_index, page in enumerate(
@@ -289,15 +298,21 @@ def load_document(file_path):
         documents = new_documents
 
         # -------------------------------------------------
+        # DOCUMENT CONTENT
+        # -------------------------------------------------
+
+        contents = [
+            item["content"]
+            for item in documents
+        ]
+
+        # -------------------------------------------------
         # WORD TF-IDF
         # -------------------------------------------------
 
         word_vectors = (
             word_vectorizer.fit_transform(
-                [
-                    item["content"]
-                    for item in documents
-                ]
+                contents
             )
         )
 
@@ -307,10 +322,7 @@ def load_document(file_path):
 
         char_vectors = (
             char_vectorizer.fit_transform(
-                [
-                    item["content"]
-                    for item in documents
-                ]
+                contents
             )
         )
 
@@ -344,6 +356,160 @@ def load_document(file_path):
 
 
 # =========================================================
+# QUERY EXPANSION
+# =========================================================
+
+def expand_query(query):
+
+    """
+    Adds useful domain terms to improve retrieval
+    without sending additional tokens to the LLM.
+    """
+
+    query_lower = query.lower()
+
+    extra_terms = []
+
+    # -----------------------------------------------------
+    # MOTION
+    # -----------------------------------------------------
+
+    if "motion" in query_lower:
+
+        extra_terms.extend(
+            [
+                "motion",
+                "movement",
+                "position"
+            ]
+        )
+
+    # -----------------------------------------------------
+    # DISTANCE / DISPLACEMENT
+    # -----------------------------------------------------
+
+    if (
+        "distance" in query_lower
+        or "displacement" in query_lower
+    ):
+
+        extra_terms.extend(
+            [
+                "distance",
+                "displacement",
+                "scalar",
+                "vector",
+                "path",
+                "direction"
+            ]
+        )
+
+    # -----------------------------------------------------
+    # SPEED
+    # -----------------------------------------------------
+
+    if "speed" in query_lower:
+
+        extra_terms.extend(
+            [
+                "speed",
+                "distance",
+                "time"
+            ]
+        )
+
+    # -----------------------------------------------------
+    # VELOCITY
+    # -----------------------------------------------------
+
+    if "velocity" in query_lower:
+
+        extra_terms.extend(
+            [
+                "velocity",
+                "displacement",
+                "direction",
+                "time"
+            ]
+        )
+
+    # -----------------------------------------------------
+    # ACCELERATION
+    # -----------------------------------------------------
+
+    if "acceleration" in query_lower:
+
+        extra_terms.extend(
+            [
+                "acceleration",
+                "change",
+                "velocity",
+                "time",
+                "rate"
+            ]
+        )
+
+    # -----------------------------------------------------
+    # KINEMATIC EQUATIONS
+    # -----------------------------------------------------
+
+    if (
+        "kinematic" in query_lower
+        or "equation" in query_lower
+        or "equations" in query_lower
+    ):
+
+        extra_terms.extend(
+            [
+                "kinematic",
+                "equations",
+                "u",
+                "v",
+                "a",
+                "s",
+                "t",
+                "motion",
+                "uniformly accelerated"
+            ]
+        )
+
+    # -----------------------------------------------------
+    # FORMULAS
+    # -----------------------------------------------------
+
+    if (
+        "formula" in query_lower
+        or "formulas" in query_lower
+    ):
+
+        extra_terms.extend(
+            [
+                "formula",
+                "equation",
+                "speed",
+                "velocity",
+                "acceleration"
+            ]
+        )
+
+    # -----------------------------------------------------
+    # COMBINE
+    # -----------------------------------------------------
+
+    if extra_terms:
+
+        return (
+            query
+            + " "
+            + " ".join(
+                extra_terms
+            )
+        )
+
+    return query
+
+
+# =========================================================
 # DOCUMENT SEARCH TOOL
 # =========================================================
 
@@ -365,22 +531,30 @@ def document_search(
     try:
 
         # -------------------------------------------------
-        # QUERY WORD VECTOR
+        # EXPAND QUERY
+        # -------------------------------------------------
+
+        retrieval_query = expand_query(
+            query
+        )
+
+        # -------------------------------------------------
+        # WORD QUERY VECTOR
         # -------------------------------------------------
 
         query_word_vector = (
             word_vectorizer.transform(
-                [query]
+                [retrieval_query]
             )
         )
 
         # -------------------------------------------------
-        # QUERY CHARACTER VECTOR
+        # CHARACTER QUERY VECTOR
         # -------------------------------------------------
 
         query_char_vector = (
             char_vectorizer.transform(
-                [query]
+                [retrieval_query]
             )
         )
 
@@ -405,12 +579,19 @@ def document_search(
         )[0]
 
         # -------------------------------------------------
-        # RANK ALL CHUNKS
+        # RANK CHUNKS
         # -------------------------------------------------
 
         ranked_indexes = (
             similarities.argsort()[::-1]
         )
+
+        if len(ranked_indexes) == 0:
+
+            return json.dumps(
+                [],
+                ensure_ascii=False
+            )
 
         # -------------------------------------------------
         # BEST SCORE
@@ -422,26 +603,17 @@ def document_search(
             ]
         )
 
-        # -------------------------------------------------
-        # SCORE THRESHOLD
-        #
-        # Dynamic threshold prevents weak chunks
-        # from being included simply because top_k
-        # has not been reached.
-        # -------------------------------------------------
-
         dynamic_threshold = max(
             MIN_RELEVANCE_SCORE,
             best_score * SECONDARY_SCORE_RATIO
         )
 
-        selected_indexes = []
+        # =================================================
+        # PASS 1
+        # ONE BEST CHUNK PER PAGE
+        # =================================================
 
-        # -------------------------------------------------
-        # FIRST PASS
-        #
-        # Select strongest chunks.
-        # -------------------------------------------------
+        page_best = {}
 
         for index in ranked_indexes:
 
@@ -453,90 +625,149 @@ def document_search(
 
                 continue
 
+            page = documents[index]["page"]
+
+            if (
+                page not in page_best
+                or score
+                > page_best[page][1]
+            ):
+
+                page_best[page] = (
+                    int(index),
+                    score
+                )
+
+        # -------------------------------------------------
+        # SORT BEST PAGE RESULTS
+        # -------------------------------------------------
+
+        page_candidates = sorted(
+            page_best.values(),
+            key=lambda item: item[1],
+            reverse=True
+        )
+
+        # -------------------------------------------------
+        # SELECT TOP PAGES
+        # -------------------------------------------------
+
+        selected_indexes = []
+
+        for index, score in page_candidates:
+
             selected_indexes.append(
-                int(index)
+                index
             )
 
             if len(selected_indexes) >= top_k:
 
                 break
 
-        # -------------------------------------------------
+        # =================================================
         # FALLBACK
-        # -------------------------------------------------
+        # =================================================
 
         if not selected_indexes:
 
             selected_indexes = [
-                int(ranked_indexes[0])
+                int(
+                    ranked_indexes[0]
+                )
             ]
 
-        # -------------------------------------------------
-        # PAGE DIVERSITY
+        # =================================================
+        # SPECIAL PAGE RECOVERY
         #
-        # If multiple chunks come from the same page,
-        # avoid filling the entire result set with
-        # duplicate content from one page.
-        # -------------------------------------------------
+        # If a query strongly matches another chunk on a
+        # page, allow that page to compete with weaker
+        # selected pages.
+        # =================================================
 
-        final_indexes = []
+        selected_pages = {
+            documents[index]["page"]
+            for index in selected_indexes
+        }
 
-        pages_seen = set()
+        for index in ranked_indexes:
 
-        # First pass:
-        # one strongest chunk per page.
+            score = float(
+                similarities[index]
+            )
 
-        for index in selected_indexes:
-
-            page = documents[index]["page"]
-
-            if page in pages_seen:
+            if score < dynamic_threshold:
 
                 continue
 
-            final_indexes.append(
-                index
-            )
+            page = documents[index]["page"]
 
-            pages_seen.add(
-                page
-            )
+            if page in selected_pages:
 
-        # Second pass:
-        # allow additional chunk only if required.
+                continue
 
-        if len(final_indexes) < top_k:
+            # Strong result can replace the weakest
+            # selected result.
 
-            for index in selected_indexes:
+            if len(selected_indexes) >= top_k:
 
-                if index in final_indexes:
-
-                    continue
-
-                final_indexes.append(
-                    index
+                weakest_index = min(
+                    selected_indexes,
+                    key=lambda idx:
+                    similarities[idx]
                 )
 
-                if len(final_indexes) >= top_k:
+                weakest_score = float(
+                    similarities[
+                        weakest_index
+                    ]
+                )
 
-                    break
+                if score > weakest_score:
+
+                    selected_indexes.remove(
+                        weakest_index
+                    )
+
+                    selected_indexes.append(
+                        int(index)
+                    )
+
+                    selected_pages = {
+                        documents[idx]["page"]
+                        for idx in selected_indexes
+                    }
+
+            else:
+
+                selected_indexes.append(
+                    int(index)
+                )
+
+                selected_pages.add(
+                    page
+                )
+
+            if len(selected_indexes) >= top_k:
+
+                break
 
         # -------------------------------------------------
-        # SORT BY RELEVANCE
+        # FINAL SORT BY RELEVANCE
         # -------------------------------------------------
 
-        final_indexes.sort(
-            key=lambda index: similarities[index],
+        selected_indexes.sort(
+            key=lambda index:
+            similarities[index],
             reverse=True
         )
 
-        # -------------------------------------------------
+        # =================================================
         # BUILD RESULTS
-        # -------------------------------------------------
+        # =================================================
 
         results = []
 
-        for index in final_indexes:
+        for index in selected_indexes:
 
             results.append(
                 {
@@ -553,12 +784,12 @@ def document_search(
 
                     "content": documents[index][
                         "content"
-                    ][:900]
+                    ][:1000]
                 }
             )
 
         # -------------------------------------------------
-        # RETURN RESULTS
+        # RETURN
         # -------------------------------------------------
 
         return json.dumps(
@@ -726,79 +957,67 @@ class ResearchAgent:
         # SYSTEM MESSAGE
         # -------------------------------------------------
 
+        system_message = (
+
+            "You are an AI Research Agent. "
+
+            "Understand the user's goal and "
+            "complete it using available tools. "
+
+            "Use calculator for mathematical "
+            "calculations. "
+
+            "Use web_search for current or "
+            "external information. "
+
+            "Use document_search whenever the "
+            "question depends on the uploaded "
+            "document. "
+
+            "When answering from the uploaded "
+            "document, rely only on information "
+            "returned by document_search. "
+
+            "Do not invent document facts. "
+
+            "Mention document page numbers when "
+            "they are returned by document_search "
+            "and relevant to the answer. "
+
+            "If multiple document sections are "
+            "retrieved, combine them carefully. "
+
+            "If the retrieved document information "
+            "is insufficient, clearly say that "
+            "the information could not be found "
+            "in the document. "
+
+            "When web_search is used, base the "
+            "answer on its returned results. "
+
+            "Include a Sources section when "
+            "web_search is used. "
+
+            "Use URLs exactly as returned by "
+            "web_search. "
+
+            "Never invent sources or URLs. "
+
+            "Answer concisely and directly."
+        )
+
         messages = [
 
             {
                 "role": "system",
 
-                "content": (
-
-                    "You are an AI Research Agent. "
-
-                    "Understand the user's goal "
-                    "and complete it using the "
-                    "available tools when necessary. "
-
-                    "Use calculator for mathematical "
-                    "calculations. "
-
-                    "Use web_search for current, "
-                    "external, or web-based information. "
-
-                    "Use document_search whenever "
-                    "the answer should come from the "
-                    "uploaded document. "
-
-                    "You may use multiple tools "
-                    "and multiple tool calls when "
-                    "needed. "
-
-                    "Continue working until the "
-                    "user's goal is fully completed. "
-
-                    "When answering questions about "
-                    "the uploaded document, rely only "
-                    "on information returned by "
-                    "document_search. "
-
-                    "Do not invent document facts. "
-
-                    "If the retrieved document content "
-                    "does not contain enough information "
-                    "to answer confidently, clearly "
-                    "say that the information could "
-                    "not be found in the document. "
-
-                    "When document_search returns page "
-                    "numbers, mention relevant page "
-                    "numbers in the answer. "
-
-                    "When multiple retrieved sections "
-                    "are relevant, combine them carefully. "
-
-                    "Do not claim that a fact came from "
-                    "the document unless it was retrieved "
-                    "from the document. "
-
-                    "When web_search is used, base the "
-                    "answer on the returned results. "
-
-                    "Include a Sources section when "
-                    "web_search is used. "
-
-                    "Use URLs exactly as returned by "
-                    "the search tool. "
-
-                    "Never invent sources or URLs. "
-
-                    "Use previous conversation context "
-                    "when it is relevant."
-                )
+                "content":
+                    system_message
             }
         ]
 
         # -------------------------------------------------
-        # ADD MEMORY
+        # MEMORY
         # -------------------------------------------------
 
         messages.extend(
@@ -817,7 +1036,7 @@ class ResearchAgent:
         )
 
         # =================================================
-        # MULTI-STEP AGENT LOOP
+        # AGENT LOOP
         # =================================================
 
         max_iterations = 5
@@ -844,7 +1063,9 @@ class ResearchAgent:
 
                         parallel_tool_calls=False,
 
-                        temperature=0.2
+                        temperature=0.2,
+
+                        max_tokens=1200
                     )
                 )
 
@@ -859,7 +1080,7 @@ class ResearchAgent:
             )
 
             # =================================================
-            # FINAL ANSWER
+            # FINAL RESPONSE
             # =================================================
 
             if not message.tool_calls:
@@ -888,7 +1109,7 @@ class ResearchAgent:
                 )
 
                 # -------------------------------------------------
-                # KEEP LAST 4 MESSAGES
+                # KEEP MEMORY SMALL
                 # -------------------------------------------------
 
                 self.conversation_history = (
@@ -898,7 +1119,7 @@ class ResearchAgent:
                 return final_answer
 
             # =================================================
-            # ADD TOOL CALL MESSAGE
+            # ADD ASSISTANT TOOL MESSAGE
             # =================================================
 
             messages.append(
@@ -906,7 +1127,7 @@ class ResearchAgent:
             )
 
             # =================================================
-            # EXECUTE TOOLS
+            # EXECUTE TOOL CALLS
             # =================================================
 
             for tool_call in message.tool_calls:
@@ -915,9 +1136,9 @@ class ResearchAgent:
                     tool_call.function.name
                 )
 
-                # =================================================
+                # -------------------------------------------------
                 # ACTIVITY MAP
-                # =================================================
+                # -------------------------------------------------
 
                 activity_map = {
 
@@ -961,24 +1182,22 @@ class ResearchAgent:
                                 self.last_activity
                             ) + 1,
 
-                            "tool": activity[
-                                "tool"
-                            ],
+                            "tool":
+                                activity["tool"],
 
-                            "label": activity[
-                                "label"
-                            ],
+                            "label":
+                                activity["label"],
 
-                            "icon": activity[
-                                "icon"
-                            ],
+                            "icon":
+                                activity["icon"],
 
-                            "status": "completed"
+                            "status":
+                                "completed"
                         }
                     )
 
                 # =================================================
-                # PARSE TOOL ARGUMENTS
+                # PARSE ARGUMENTS
                 # =================================================
 
                 try:
@@ -1059,7 +1278,7 @@ class ResearchAgent:
                     )
 
                 # =================================================
-                # RETURN TOOL RESULT
+                # TOOL RESPONSE
                 # =================================================
 
                 messages.append(
